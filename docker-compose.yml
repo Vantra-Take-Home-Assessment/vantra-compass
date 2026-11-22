@@ -1,38 +1,103 @@
-version: "3.8"
+# Project Compass: split services behind one gateway.
+#   gateway   :3000  public entrypoint, same API surface as the monolith
+#   fleet-api        auth, tenants, vehicles, dashboard
+#   ingestion        device telemetry write path, latest-reading projection + cache
+#   alerting         offline detection, alert lifecycle, delivery outbox
+#
+# Same Dockerfile for every service, but deliberately no shared `image:` tag.
+# With `build: .` + one `image:` tag on every service, compose built that tag
+# several times in parallel and, on Docker's containerd image store, the
+# builds raced and failed with "image ... already exists". Without the tag,
+# each service gets its own image name; BuildKit dedupes the identical steps,
+# so it is still effectively one build, and `up --build <service>` works.
+x-service: &service
+  build: .
+  restart: unless-stopped
+  environment: &env
+    MONGO_URI: mongodb://mongo:27017/vantra
+    REDIS_URL: redis://redis:6379
+    JWT_SECRET: ${JWT_SECRET:-local-dev-secret}
+    INTERNAL_TOKEN: ${INTERNAL_TOKEN:-local-internal-token}
+    FLEET_API_URL: http://fleet-api:3000
+    INGESTION_URL: http://ingestion:3000
+    PORT: "3000"
+    # Image runs with NODE_ENV=production, which disables Swagger by default.
+    SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+  depends_on:
+    mongo: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  healthcheck:
+    test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+  deploy:
+    resources:
+      limits: { memory: 384M }
 
 services:
-  app:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      MONGO_URI: mongodb://mongo:27017/vantra
-      JWT_SECRET: local-dev-secret
+  gateway:
+    image: nginx:1.27-alpine
+    ports: ["3000:80"]
+    volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro"]
     depends_on:
-      - mongo
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.25"
+      fleet-api: { condition: service_healthy }
+      ingestion: { condition: service_healthy }
+      alerting: { condition: service_healthy }
+
+  fleet-api:
+    <<: *service
+    command: ["node", "dist/src/apps/fleet-api/main.js"]
+
+  ingestion:
+    <<: *service
+    command: ["node", "dist/src/apps/ingestion/main.js"]
+
+  alerting:
+    <<: *service
+    command: ["node", "dist/src/apps/alerting/main.js"]
+    environment:
+      <<: *env
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      NOTIFY_SIMULATED_FAILURE_RATE: ${NOTIFY_SIMULATED_FAILURE_RATE:-0}
+      NOTIFY_CONCURRENCY: ${NOTIFY_CONCURRENCY:-16}
+
+  # One-shot jobs: `docker compose run --rm tools node dist/scripts/seed.js`
+  tools:
+    <<: *service
+    profiles: ["tools"]
+    restart: "no"
+    command: ["node", "dist/scripts/migrate-compass.js"]
 
   mongo:
     image: mongo:7
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
+    restart: unless-stopped
+    # Host port is only for seed/migrate/tests run from the host. Override if
+    # you already run Mongo locally: MONGO_HOST_PORT=27018 docker compose up
+    ports: ["${MONGO_HOST_PORT:-27017}:27017"]
+    volumes: [mongo_data:/data/db]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
-    # Reserved for dashboard caching work - not yet used by the app.
+    restart: unless-stopped
+    # AOF so the telemetry stream and un-acked entries survive a restart.
+    # noeviction: the stream and the vehicle registry must never be evicted
+    # silently. The latest:* cache hashes carry a TTL instead.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    # Override if a local Redis already holds 6379: REDIS_HOST_PORT=6380
+    ports: ["${REDIS_HOST_PORT:-6379}:6379"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   mongo_data:
+  redis_data:

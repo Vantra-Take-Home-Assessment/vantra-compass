@@ -5,3 +5,20 @@ dist/
 .DS_Store
 coverage/
 *.tsbuildinfo
+
+# Editor settings
+.vscode/
+.idea/
+
+# Local env overrides (only .env.example is committed)
+.env.*
+!.env.example
+
+# Personal working notes, not part of the submission (the plan is submitted as a separate document)
+docs/COMPASS_PLAN.md
+docs/DEMO_SCRIPT.md
+
+# Scratch output
+tmp/
+*.tmp
+.swagger-check/

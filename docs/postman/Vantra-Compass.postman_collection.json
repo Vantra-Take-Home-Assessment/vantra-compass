@@ -1,0 +1,531 @@
+{
+  "info": {
+    "name": "Vantra Compass API",
+    "description": "Vantra fleet telemetry API (Project Compass split services behind the nginx gateway).\n\nQuick start:\n1. Start the stack (README) so the gateway is on http://localhost:3000.\n2. Run **Auth / Login (dispatcher)** and **Auth / Login (admin)** first. They store `token` and `adminToken` in collection variables automatically.\n3. Everything else uses those tokens.\n\nOr run the whole collection (Runner / newman) in order; each request has status-code tests.\n\nVariables (Collection > Variables): `baseUrl`, logins, `vehicleId` (own tenant), `otherTenantVehicleId`, `alertsVehicleId`, `recalibrateVehicleId`.\n\nTenancy: the dispatcher demo user and the admin are both in `northbound-logistics` (VH-00001, VH-00005, VH-00009 ... i.e. every 4th vehicle). VH-00002 belongs to `coastal-freight`, so reading it returns 404.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "dispatcherEmail", "value": "demo@vantra.internal" },
+    { "key": "dispatcherPassword", "value": "demo-password-123" },
+    { "key": "adminEmail", "value": "admin@northbound-logistics.demo" },
+    { "key": "adminPassword", "value": "compass-demo-123" },
+    { "key": "vehicleId", "value": "VH-00001" },
+    { "key": "otherTenantVehicleId", "value": "VH-00002" },
+    { "key": "alertsVehicleId", "value": "VH-00017" },
+    { "key": "recalibrateVehicleId", "value": "VH-00021" },
+    { "key": "token", "value": "" },
+    { "key": "adminToken", "value": "" },
+    { "key": "alertId", "value": "" },
+    { "key": "newVehicleId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health (gateway -> fleet-api)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{baseUrl}}/health",
+            "description": "Returns { ok, mongo, redis }. 503 if the service has lost Mongo; Redis down is reported as \"degraded\"."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and ok', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().ok).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login (dispatcher)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{dispatcherEmail}}\",\n  \"password\": \"{{dispatcherPassword}}\"\n}" },
+            "url": "{{baseUrl}}/auth/login",
+            "description": "Stores the JWT in `token`. The token carries tenantId and role. Rate limited: 5 attempts per email per 60s (429)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 with accessToken', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().accessToken).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('token', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login (admin)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}" },
+            "url": "{{baseUrl}}/auth/login",
+            "description": "Stores the JWT in `adminToken`. Admin-only endpoints use it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 with accessToken', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('adminToken', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login (wrong password -> 401)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{dispatcherEmail}}\",\n  \"password\": \"not-the-password\"\n}" },
+            "url": "{{baseUrl}}/auth/login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('401', () => pm.response.to.have.status(401));"] }
+            }
+          ]
+        },
+        {
+          "name": "Register user (admin only)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"dispatcher-{{$timestamp}}@northbound.demo\",\n  \"password\": \"password123\",\n  \"role\": \"dispatcher\"\n}" },
+            "url": "{{baseUrl}}/auth/register",
+            "description": "Creates a user in the admin's own tenant. `role` is optional (admin | dispatcher, default dispatcher). Anonymous -> 401, dispatcher -> 403, duplicate email -> 409."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 in admin tenant', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().tenantId).to.eql('northbound-logistics');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register user (dispatcher -> 403)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"nope-{{$timestamp}}@x.com\",\n  \"password\": \"password123\"\n}" },
+            "url": "{{baseUrl}}/auth/register"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403', () => pm.response.to.have.status(403));"] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Vehicles",
+      "item": [
+        {
+          "name": "List vehicles (own tenant)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/vehicles" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, only caller tenant', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const tenants = new Set(pm.response.json().map(v => v.tenantId));",
+                  "  pm.expect([...tenants]).to.eql(['northbound-logistics']);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get vehicle",
+          "request": { "method": "GET", "url": "{{baseUrl}}/vehicles/{{vehicleId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200', () => pm.response.to.have.status(200));"] }
+            }
+          ]
+        },
+        {
+          "name": "Get other tenant's vehicle (-> 404)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/vehicles/{{otherTenantVehicleId}}",
+            "description": "Same 404 as a vehicle that doesn't exist, so ids of other tenants can't be probed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('404', () => pm.response.to.have.status(404));"] }
+            }
+          ]
+        },
+        {
+          "name": "Create vehicle (admin only)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"VH-PM-{{$timestamp}}\",\n  \"fleetName\": \"Northbound Logistics\"\n}" },
+            "url": "{{baseUrl}}/vehicles",
+            "description": "vehicleId must match ^[A-Za-z0-9_-]{1,64}$ and be globally unique (409 otherwise). Created in the admin's tenant. Stores the new id in `newVehicleId`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('newVehicleId', pm.response.json().vehicleId);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Ingestion (device-facing, no auth)",
+      "item": [
+        {
+          "name": "Ingest telemetry",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"{{vehicleId}}\",\n  \"recordedAt\": \"{{$isoTimestamp}}\",\n  \"lat\": 6.95,\n  \"lng\": 79.85\n}" },
+            "url": "{{baseUrl}}/ingestion/telemetry",
+            "description": "GPS reading. Updates the dashboard's latest reading and liveness; auto-resolves an open offline alert for this vehicle. recordedAt more than 60s in the future, or coordinates out of range -> 400."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201, tenant resolved', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().tenantId).to.eql('northbound-logistics');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ingest late (older) reading",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"{{vehicleId}}\",\n  \"recordedAt\": \"{{lateRecordedAt}}\",\n  \"lat\": 1.0,\n  \"lng\": 1.0\n}" },
+            "url": "{{baseUrl}}/ingestion/telemetry",
+            "description": "A delayed/retried reading 10 minutes old. It's stored, but the dashboard keeps showing the newer reading (monotonic merge)."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.variables.set('lateRecordedAt', new Date(Date.now() - 10 * 60 * 1000).toISOString());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('201', () => pm.response.to.have.status(201));"] }
+            }
+          ]
+        },
+        {
+          "name": "Ingest for newly created vehicle",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"{{newVehicleId}}\",\n  \"recordedAt\": \"{{$isoTimestamp}}\",\n  \"lat\": 6.91,\n  \"lng\": 79.88\n}" },
+            "url": "{{baseUrl}}/ingestion/telemetry",
+            "description": "Run after Vehicles / Create vehicle. Shows the registry resolves the new vehicle's tenant immediately."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["if (!pm.collectionVariables.get('newVehicleId')) { pm.execution.skipRequest(); }"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('201', () => pm.response.to.have.status(201));"] }
+            }
+          ]
+        },
+        {
+          "name": "Ingest unregistered vehicle (quarantined)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"UNKNOWN-1\",\n  \"recordedAt\": \"{{$isoTimestamp}}\",\n  \"lat\": 6.9,\n  \"lng\": 79.9\n}" },
+            "url": "{{baseUrl}}/ingestion/telemetry",
+            "description": "Stored with tenantId null: visible to no tenant, never alerted on."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201, quarantined', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().tenantId).to.eql(null);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ingest invalid coordinates (-> 400)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"vehicleId\": \"{{vehicleId}}\",\n  \"recordedAt\": \"{{$isoTimestamp}}\",\n  \"lat\": 123,\n  \"lng\": 79.9\n}" },
+            "url": "{{baseUrl}}/ingestion/telemetry"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('400', () => pm.response.to.have.status(400));"] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Fleet overview",
+          "request": { "method": "GET", "url": "{{baseUrl}}/dashboard/fleet-overview" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200', () => pm.response.to.have.status(200));"] }
+            }
+          ]
+        },
+        {
+          "name": "Vehicle statuses (latest reading per vehicle)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/dashboard/vehicle-statuses",
+            "description": "The hot path. Served from the Redis latest:{tenant} hash (~10-20ms warm); rebuilt by ingestion on a cold cache. `latest.batteryPct` is the normalised battery value."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('vehicleId shows the newest reading, not the late one', () => {",
+                  "  const v = pm.response.json().find(s => s.vehicle.vehicleId === pm.collectionVariables.get('vehicleId'));",
+                  "  pm.expect(v.latest.location.lat).to.eql(6.95);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Alerts",
+      "item": [
+        {
+          "name": "Active alerts for a vehicle",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/alerts/{{alertsVehicleId}}",
+            "description": "Open alerts for one vehicle in the caller's tenant. The offline sweep runs every minute; seeded vehicles that haven't reported for 15+ minutes have one open `vehicle-offline` alert. Stores the first alert id in `alertId`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const list = pm.response.json();",
+                  "pm.collectionVariables.set('alertId', list.length ? list[0]._id : '');",
+                  "if (!list.length) console.log('No open alert for this vehicle; pick another alertsVehicleId to try Resolve.');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Active alerts for other tenant's vehicle (empty)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/alerts/{{otherTenantVehicleId}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and empty', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json()).to.have.length(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resolve alert",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/alerts/{{alertId}}/resolve",
+            "description": "Records resolvedBy = your email. Acknowledges this offline episode only: if the vehicle reports and then goes quiet again, it alerts again (the old 6h VANTRA-441 suppression is gone)."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["if (!pm.collectionVariables.get('alertId')) { pm.execution.skipRequest(); }"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 resolved', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().status).to.eql('resolved');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Force recalibrate (admin only)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }] },
+            "method": "POST",
+            "url": "{{baseUrl}}/admin/vehicles/{{recalibrateVehicleId}}/force-recalibrate",
+            "description": "Ops endpoint: resolves the vehicle's open alerts (tenant-scoped, audited). Dispatcher token -> 403."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().recalibrated).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Force recalibrate (dispatcher -> 403)",
+          "request": { "method": "POST", "url": "{{baseUrl}}/admin/vehicles/{{recalibrateVehicleId}}/force-recalibrate" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403', () => pm.response.to.have.status(403));"] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Security checks",
+      "item": [
+        {
+          "name": "Dashboard without token (-> 401)",
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{baseUrl}}/dashboard/vehicle-statuses" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('401', () => pm.response.to.have.status(401));"] }
+            }
+          ]
+        },
+        {
+          "name": "Internal endpoint via gateway (-> 404)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{baseUrl}}/internal/latest?tenantId=northbound-logistics",
+            "description": "/internal/* is service-to-service only; the gateway blocks it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('404', () => pm.response.to.have.status(404));"] }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

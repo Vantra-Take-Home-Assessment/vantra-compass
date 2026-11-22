@@ -1,0 +1,9 @@
+# Without this, `COPY . .` copied the host's node_modules (macOS-native
+# bcrypt binary) over the container's Linux install.
+node_modules
+dist
+.git
+.env
+*.log
+coverage
+*.tsbuildinfo
