@@ -135,4 +135,4 @@ rebuilds racing live writes, and eviction during a rebuild.
 
 - **`DriftCorrectionJob`**: removed. It rewrote `recordedAt` on raw telemetry. Liveness now uses server-side `receivedAt`, so nothing needs correcting. See the plan, section 5.
 - **The 6h alert debounce (VANTRA-441)**: replaced. See the plan, section 5.
-- **The monolith entrypoint** (`src/main.ts`, `app.module.ts`): replaced by `src/apps/*/main.ts`. In a real rollout the gateway would route to the monolith and move one path at a time (plan, section 2).
+- **The monolith entrypoint** (`src/main.ts`, `app.module.ts`): replaced by `src/apps/*/main.ts`. In a real rollout the gateway would route to the monolith and move one path at a time (plan, section 3).
