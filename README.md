@@ -44,16 +44,24 @@ separate databases is a later step, covered in the plan.
 
 ## Running it
 
-Requires Docker.
+Requires Docker with Compose v2. Node isn't needed to run the stack: the seed
+and migration run inside the service image.
 
 ```bash
+git clone https://github.com/Vantra-Take-Home-Assessment/vantra-compass.git
+cd vantra-compass
+
 docker compose up -d mongo redis
-npm install && npm run seed              # ~1M historical events, ~10s (or: docker compose run --rm tools node dist/scripts/seed.js)
-docker compose run --rm tools            # Compass migration: tenants, backfills, projections (idempotent)
-docker compose up -d --build             # gateway + 3 services; all report healthy in ~15s
+docker compose run --rm tools node dist/scripts/seed.js   # builds the image, then ~1M historical events (~1 min)
+docker compose run --rm tools                             # Compass migration: tenants, backfills, projections (idempotent)
+docker compose up -d --build                              # gateway + 3 services; all report healthy in ~15s
 ```
 
-API at `http://localhost:3000` (same paths as the monolith). A Postman
+Check it with `docker compose ps` (every service `healthy`) and
+`curl http://localhost:3000/health`.
+
+API at `http://localhost:3000` (same paths as the monolith). Swagger UI is at
+`/docs/fleet-api`, `/docs/ingestion` and `/docs/alerting`. A Postman
 collection covering every endpoint, with auto-login and status-code tests,
 is in [docs/postman/](docs/postman/Vantra-Compass.postman_collection.json).
 Import it, run the two logins, then any request (or Run collection). `GET /health` on
@@ -64,10 +72,15 @@ published ports (the services talk to each other on the compose network, so
 only host-side tools care): `REDIS_HOST_PORT=6380 MONGO_HOST_PORT=27018 docker compose up -d`,
 then point host tools at them, e.g. `REDIS_URL_TEST=redis://localhost:6380/15 npm run test:int`.
 
-**Windows.** Works with Docker Desktop or Docker Engine inside WSL2. With
-npm 11+, bcrypt's install script may be skipped by `allowScripts`; it ships a
-prebuilt binary, so check with `node -e "require('bcrypt')"` before reaching
-for build tools.
+**Host-side scripts** (`npm run simulate`, `npm test`, `npm run test:int`,
+`npm run seed`) need Node 20+ and `npm install`. `package.json` already allows
+bcrypt's install script for npm 11+, which otherwise skips it and leaves bcrypt
+without its native binary (`Cannot find module ... bcrypt_lib.node`).
+
+**Windows.** Works with Docker Desktop or Docker Engine inside WSL2. With plain
+Docker Engine in WSL2 (no Docker Desktop), WSL can shut the distro down once no
+WSL terminal is open, which stops Docker and every container with it. Keep a WSL
+terminal open while you use the stack.
 
 | Login | Password | Role / tenant |
 |---|---|---|

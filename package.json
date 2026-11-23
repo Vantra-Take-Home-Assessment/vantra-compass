@@ -56,5 +56,8 @@
     "testEnvironment": "node",
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$"
+  },
+  "allowScripts": {
+    "bcrypt@5.1.1": true
   }
 }

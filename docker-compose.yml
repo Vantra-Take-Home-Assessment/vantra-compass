@@ -38,6 +38,10 @@ x-service: &service
 services:
   gateway:
     image: nginx:1.27-alpine
+    # Without this, a Docker daemon restart brings the services back but not
+    # the gateway, so :3000 stays down. Upstreams are resolved per request
+    # (`set $u` in nginx.conf), so it starts fine before the services are ready.
+    restart: unless-stopped
     ports: ["3000:80"]
     volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro"]
     depends_on:
